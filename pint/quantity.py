@@ -1154,6 +1154,121 @@ class _Quantity(SharedRegistryObject):
         return [self.__class__(value, units).tolist() if isinstance(value, list) else self.__class__(value, units)
                 for value in self._magnitude.tolist()]
 
+    def __numpy_ufunc__(self, ufunc, method, i, inputs, **kwargs):
+        # According to:
+        # http://docs.scipy.org/doc/numpy-dev/reference/arrays.classes.html#special-attributes-and-methods
+        # This function should supercede __array_priority__ so we
+        # shouldn't need any version checking.
+        # However, the bug documented at:
+        # https://github.com/lkilcher/pint/blob/bug/test.py
+        # may indicate otherwise...
+
+        # If we're not handling the function, then just pass the
+        # inputs through to the function call.
+        if ufunc.__name__ not in self.__handled:
+            # Take the .magnitude of inputs to avoid recursion into this function.
+            inputs = [getattr(inp, 'magnitude', inp) for inp in inputs]
+            return getattr(ufunc, method)(*inputs, **kwargs)
+
+        ##########
+        # Is this '__handling' code still needed?
+        ###
+        # Only one ufunc should be handled at a time.
+        # If a ufunc is already being handled (and this is not another domain),
+        # something is wrong..
+        # if self.__handling:
+        #     raise Exception('Cannot handled nested ufuncs.\n'
+        #                     'Current: {0}\n'
+        #                     'New: {1}'.format(context, self.__handling))
+        # self.__handling = context
+
+        # Store the destination units
+        dst_units = None
+        # List of magnitudes of Quantities with the right units
+        # to be used as argument of the ufunc
+        mobjs = None
+
+        # First, we check the units of the input arguments.
+
+        if ufunc.__name__ in self.__require_units:
+            # ufuncs in __require_units
+            # require specific units
+            # This is more complex that it should be due to automatic
+            # conversion between radians/dimensionless
+            # TODO: maybe could be simplified using Contexts
+            dst_units = self.__require_units[ufunc.__name__]
+            if dst_units == 'radian':
+                mobjs = []
+                for other in inputs:
+                    unt = getattr(other, '_units', '')
+                    if unt == 'radian':
+                        mobjs.append(getattr(other, 'magnitude', other))
+                    else:
+                        factor, units = self._REGISTRY._get_root_units(unt)
+                        if units and units != UnitsContainer({'radian': 1}):
+                            raise DimensionalityError(units, dst_units)
+                        mobjs.append(getattr(other, 'magnitude', other) * factor)
+                mobjs = tuple(mobjs)
+            else:
+                dst_units = self._REGISTRY.parse_expression(dst_units)._units
+
+        elif len(inputs) > 1 and ufunc.__name__ not in self.__skip_other_args:
+            # ufunc with multiple arguments require that all inputs have
+            # the same arguments unless they are in __skip_other_args
+            dst_units = inputs[0]._units
+
+        # Do the conversion (if needed) and extract the magnitude for each input.
+        if mobjs is None:
+            if dst_units is not None:
+                mobjs = tuple(self._REGISTRY.convert(getattr(other, 'magnitude', other),
+                                                     getattr(other, 'units', ''),
+                                                     dst_units)
+                              for other in inputs)
+            else:
+                mobjs = tuple(getattr(other, 'magnitude', other)
+                              for other in inputs)
+
+        # call the ufunc
+        out = getattr(ufunc, method)(*mobjs, **kwargs)
+
+        if type(out) is tuple:
+            out = list(out)
+        else:
+            out = [out]
+
+        # Second, we set the units of the output value(s).
+        for i, o in enumerate(out):
+            ufname = ufunc.__name__ if i == 0 else '{0}__{1}'.format(ufunc.__name__, i)
+            if ufname in self.__set_units:
+                try:
+                    out[i] = self.__class__(o, self.__set_units[ufname])
+                except:
+                    raise ValueError
+            elif ufname in self.__copy_units:
+                try:
+                    out[i] = self.__class__(o, self._units)
+                except:
+                    raise ValueError
+            elif ufname in self.__prod_units:
+                tmp = self.__prod_units[ufname]
+                if tmp == 'size':
+                    out[i] = self.__class__(o, self._units ** self._magnitude.size)
+                elif tmp == 'div':
+                    units1 = inputs[0]._units if isinstance(inputs[0], self.__class__) else UnitsContainer()
+                    units2 = inputs[1]._units if isinstance(inputs[1], self.__class__) else UnitsContainer()
+                    out[i] = self.__class__(o, units1 / units2)
+                elif tmp == 'mul':
+                    units1 = inputs[0]._units if isinstance(inputs[0], self.__class__) else UnitsContainer()
+                    units2 = inputs[1]._units if isinstance(inputs[1], self.__class__) else UnitsContainer()
+                    out[i] = self.__class__(o, units1 * units2)
+                else:
+                    out[i] = self.__class__(o, self._units ** tmp)
+
+        if len(out) == 1:
+            return out[0]
+        else:
+            return tuple(out)
+
     __array_priority__ = 17
 
     def __array_prepare__(self, obj, context=None):
