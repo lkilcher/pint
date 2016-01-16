@@ -1154,6 +1154,9 @@ class _Quantity(SharedRegistryObject):
         return [self.__class__(value, units).tolist() if isinstance(value, list) else self.__class__(value, units)
                 for value in self._magnitude.tolist()]
 
+    def __numpy_ufunc__(self, ):
+        pass
+
     __array_priority__ = 17
 
     def __array_prepare__(self, obj, context=None):
